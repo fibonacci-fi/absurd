@@ -469,6 +469,7 @@ export class Absurd {
   private readonly log: Log;
   private worker: Worker | null = null;
   private readonly hooks: AbsurdHooks;
+  private maxNoClaimCount: number = 3;
 
   constructor(options: AbsurdOptions | string | pg.Pool = {}) {
     if (typeof options === "string" || isQueryable(options)) {
@@ -812,6 +813,9 @@ export class Absurd {
     };
 
     this.worker = worker;
+    const maxNoWorkCount = this.maxNoClaimCount;
+    let retriesNoWork = 0;
+
     workerLoopPromise = (async () => {
       while (running) {
         try {
@@ -835,9 +839,20 @@ export class Absurd {
           });
 
           if (messages.length === 0) {
+            retriesNoWork += 1;
+            if (retriesNoWork >= maxNoWorkCount) {
+              this.log.warn(
+                `[absurd] worker ${workerId} has been idle for ${maxNoWorkCount} consecutive batches without claiming any tasks`,
+              );
+              running = false;
+              continue;
+            }
             await waitForAvailability();
             continue;
           }
+
+          // we found some work messages, reset the retry counter
+          retriesNoWork = 0;
 
           for (const task of messages) {
             const promise = this.executeTask(task, claimTimeout, {
