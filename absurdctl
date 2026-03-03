@@ -3,7 +3,6 @@ import csv
 import io
 import json
 import os
-import re
 import subprocess
 import sys
 import shutil
@@ -14,27 +13,36 @@ from urllib.parse import urlparse
 from optparse import OptionParser, IndentedHelpFormatter
 
 
-# Queue names are interpolated into dynamic table names (t_<queue>, r_<queue>, ...)
-# so we must constrain characters to a safe subset.
-QUEUE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+# Queue names are interpolated into generated table/index names (t_<queue>,
+# r_<queue>_sai, ...). We cap UTF-8 byte length so those identifiers stay
+# within PostgreSQL's 63-byte limit; character set is otherwise delegated to
+# PostgreSQL quoted identifier rules.
+MAX_QUEUE_NAME_LENGTH = 57
+
+
+def quote_ident(identifier):
+    """Quote a SQL identifier using PostgreSQL double-quote escaping."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def queue_relation(prefix, queue_name):
+    """Return a fully qualified absurd.<prefix>_<queue> relation reference."""
+    return f"absurd.{quote_ident(f'{prefix}_{queue_name}')}"
 
 
 def validate_queue_name(value):
-    """Validate queue names used in dynamic table names.
+    """Validate queue names used in dynamic table/index names."""
+    if value is None or len(value.strip()) == 0:
+        print("Error: Queue name must be provided.", file=sys.stderr)
+        sys.exit(1)
 
-    Queue names may start with a letter or digit and may contain letters,
-    numbers, underscores, and hyphens.
-    """
-    if not value or not QUEUE_NAME_PATTERN.match(value):
+    if len(value.encode("utf-8")) > MAX_QUEUE_NAME_LENGTH:
         print(
-            f"Error: Invalid queue name '{value}'. Must start with a letter or number "
-            "and contain only letters, numbers, underscores, and hyphens.",
+            f"Error: Queue name '{value}' is too long (max {MAX_QUEUE_NAME_LENGTH} bytes).",
             file=sys.stderr,
         )
         sys.exit(1)
-    if len(value) > 63:
-        print(f"Error: Queue name '{value}' is too long (max 63 characters).", file=sys.stderr)
-        sys.exit(1)
+
     return value
 
 
@@ -449,10 +457,14 @@ def cmd_cleanup(args):
     if options.dry_run:
         print("DRY RUN MODE - No data will be deleted")
 
+        t_rel = queue_relation("t", queue_name)
+        r_rel = queue_relation("r", queue_name)
+        e_rel = queue_relation("e", queue_name)
+
         task_count = run_psql(
             config,
-            f"""SELECT COUNT(*) FROM absurd.t_{queue_name} t
-                LEFT JOIN absurd.r_{queue_name} r ON r.run_id = t.last_attempt_run
+            f"""SELECT COUNT(*) FROM {t_rel} t
+                LEFT JOIN {r_rel} r ON r.run_id = t.last_attempt_run
                 WHERE t.state IN ('completed', 'failed', 'cancelled')
                 AND ((t.state = 'completed' AND r.completed_at < NOW() - make_interval(secs => :'ttl_seconds'::int))
                 OR (t.state = 'failed' AND r.failed_at < NOW() - make_interval(secs => :'ttl_seconds'::int))
@@ -464,7 +476,7 @@ def cmd_cleanup(args):
 
         event_count = run_psql(
             config,
-            f"SELECT COUNT(*) FROM absurd.e_{queue_name} WHERE emitted_at < NOW() - make_interval(secs => :'ttl_seconds'::int);",
+            f"SELECT COUNT(*) FROM {e_rel} WHERE emitted_at < NOW() - make_interval(secs => :'ttl_seconds'::int);",
             tuples_only=True,
             no_align=True,
             variables={"ttl_seconds": ttl_seconds},
@@ -1040,22 +1052,27 @@ def cmd_list_tasks(args):
             where_clauses.append("t.state = :'status'")
             variables["status"] = options.status
 
+        variables["queue_name"] = queue
+
         where_clause = ""
         if where_clauses:
             where_clause = "WHERE " + " AND ".join(where_clauses)
+
+        t_rel = queue_relation("t", queue)
+        r_rel = queue_relation("r", queue)
 
         query = f"""
             SELECT
                 t.task_id,
                 r.run_id,
                 t.task_name,
-                '{queue}' as queue_name,
+                :'queue_name' as queue_name,
                 t.state,
                 r.attempt,
                 t.max_attempts,
                 COALESCE(r.completed_at, r.failed_at, r.started_at, r.created_at) AS updated_at
-            FROM absurd.t_{queue} t
-            LEFT JOIN absurd.r_{queue} r ON r.run_id = t.last_attempt_run
+            FROM {t_rel} t
+            LEFT JOIN {r_rel} r ON r.run_id = t.last_attempt_run
             {where_clause}
             ORDER BY updated_at DESC
             LIMIT {options.limit}
@@ -1202,9 +1219,10 @@ def cmd_dump_task(args):
     if options.run_id:
         # Search for run_id across all queues
         for queue in queues:
+            r_rel = queue_relation("r", queue)
             result = run_psql(
                 config,
-                f"SELECT task_id FROM absurd.r_{queue} WHERE run_id = :'run_id';",
+                f"SELECT task_id FROM {r_rel} WHERE run_id = :'run_id';",
                 tuples_only=True,
                 no_align=True,
                 variables={"run_id": options.run_id},
@@ -1221,9 +1239,10 @@ def cmd_dump_task(args):
         # Search for task_id across all queues
         task_id = options.task_id
         for queue in queues:
+            t_rel = queue_relation("t", queue)
             result = run_psql(
                 config,
-                f"SELECT COUNT(*) FROM absurd.t_{queue} WHERE task_id = :'task_id';",
+                f"SELECT COUNT(*) FROM {t_rel} WHERE task_id = :'task_id';",
                 tuples_only=True,
                 no_align=True,
                 variables={"task_id": task_id},
@@ -1235,6 +1254,9 @@ def cmd_dump_task(args):
         if not target_queue:
             print(f"Task ID '{task_id}' not found in any queue", file=sys.stderr)
             sys.exit(1)
+
+    t_target_rel = queue_relation("t", target_queue)
+    r_target_rel = queue_relation("r", target_queue)
 
     # Fetch task and runs
     if options.run_id:
@@ -1259,8 +1281,8 @@ def cmd_dump_task(args):
                 t.cancelled_at,
                 COALESCE(r.completed_at, r.failed_at, r.started_at, r.created_at) AS updated_at,
                 r.claimed_by
-            FROM absurd.t_{target_queue} t
-            JOIN absurd.r_{target_queue} r ON r.task_id = t.task_id
+            FROM {t_target_rel} t
+            JOIN {r_target_rel} r ON r.task_id = t.task_id
             WHERE r.run_id = :'run_id'
         """
         runs_rows = run_psql_csv(config, runs_query, variables={"run_id": options.run_id})
@@ -1286,8 +1308,8 @@ def cmd_dump_task(args):
                 t.cancelled_at,
                 COALESCE(r.completed_at, r.failed_at, r.started_at, r.created_at) AS updated_at,
                 r.claimed_by
-            FROM absurd.t_{target_queue} t
-            JOIN absurd.r_{target_queue} r ON r.task_id = t.task_id
+            FROM {t_target_rel} t
+            JOIN {r_target_rel} r ON r.task_id = t.task_id
             WHERE t.task_id = :'task_id'
             ORDER BY r.attempt
         """
@@ -1324,6 +1346,10 @@ def cmd_dump_task(args):
                 }
             )
 
+    c_target_rel = queue_relation("c", target_queue)
+    w_target_rel = queue_relation("w", target_queue)
+    e_target_rel = queue_relation("e", target_queue)
+
     # For each run, fetch checkpoints and waits
     for run in runs:
         # Fetch checkpoints
@@ -1334,7 +1360,7 @@ def cmd_dump_task(args):
                 status,
                 owner_run_id,
                 updated_at
-            FROM absurd.c_{target_queue}
+            FROM {c_target_rel}
             WHERE task_id = :'task_id' AND owner_run_id = :'run_id'
             ORDER BY updated_at DESC
         """
@@ -1373,9 +1399,9 @@ def cmd_dump_task(args):
                 e.payload as event_payload_emitted,
                 e.emitted_at,
                 COALESCE(w.created_at, r.started_at) as updated_at
-            FROM absurd.r_{target_queue} r
-            LEFT JOIN absurd.w_{target_queue} w ON w.run_id = r.run_id
-            LEFT JOIN absurd.e_{target_queue} e ON e.event_name = r.wake_event AND e.payload IS NOT NULL
+            FROM {r_target_rel} r
+            LEFT JOIN {w_target_rel} w ON w.run_id = r.run_id
+            LEFT JOIN {e_target_rel} e ON e.event_name = r.wake_event AND e.payload IS NOT NULL
             WHERE r.run_id = :'run_id' AND r.state = 'sleeping'
         """
 
@@ -1511,6 +1537,81 @@ def cmd_dump_task(args):
                 print()
 
 
+def cmd_emit_event(args):
+    """Emit an event to wake waiting tasks."""
+    usage = "usage: %prog emit-event [options] EVENT_NAME"
+    parser = build_command_parser(usage)
+
+    parser.add_option(
+        "-q",
+        "--queue",
+        dest="queue",
+        metavar="NAME",
+        help="Queue name (default: default)",
+    )
+
+    parser.add_option(
+        "-P",
+        "--param",
+        dest="params",
+        action="append",
+        default=[],
+        metavar="K=V",
+        help="Event payload parameter. Use -P key=value for strings or -P key:=json for JSON values. "
+        "Supports dotted paths for nested objects (e.g., -P user.name=Alice)",
+    )
+    parser.add_option(
+        "--payload",
+        dest="base_payload",
+        metavar="JSON",
+        help="Base JSON object for payload (will be merged with -P flags)",
+    )
+
+    examples = [
+        "absurdctl emit-event order.completed",
+        "absurdctl emit-event order.completed -P orderId=123 -P status=shipped",
+        "absurdctl emit-event user.created -P user.id:=42 -P user.name=Alice",
+        'absurdctl emit-event order.completed --payload \'{"orderId":"123"}\'',
+        "absurdctl emit-event -q myqueue shipment.packed -P trackingNumber=ABC123",
+    ]
+
+    options, args = parse_args_with_help(parser, args, examples)
+
+    if len(args) != 1:
+        print("Error: Missing required argument EVENT_NAME", file=sys.stderr)
+        parser.print_help()
+        sys.exit(1)
+
+    event_name = args[0]
+    config = config_from_options(options)
+
+    payload_json = build_json_params(options.params, options.base_payload)
+
+    queue = validate_queue_name(options.queue or "default")
+
+    ensure_queue_exists(config, queue)
+
+    details = [
+        ("Event", event_name),
+        ("Queue", queue),
+        ("Payload", payload_json),
+    ]
+    details.extend(get_common_db_details(config))
+    print_verbose_configuration(options.verbose, details)
+
+    query = "SELECT absurd.emit_event(:'queue', :'event_name', :'payload_json'::jsonb);"
+    run_psql(
+        config,
+        query,
+        variables={
+            "queue": queue,
+            "event_name": event_name,
+            "payload_json": payload_json,
+        },
+    )
+    print(f"Event '{event_name}' emitted successfully to queue '{queue}'")
+
+
 def cmd_agent_help(args):
     """Print quick guidance for automated agents."""
     if args:
@@ -1530,6 +1631,7 @@ def cmd_agent_help(args):
         - list-tasks: inspect recent activity in a queue (`absurdctl list-tasks --queue=default`)
         - dump-task: pull full details for a task or run (`absurdctl dump-task --task-id=<uuid>`)
         - spawn-task: enqueue new work (`absurdctl spawn-task my-task`)
+        - emit-event: emit an event to wake waiting tasks (`absurdctl emit-event order.completed -P orderId=123`)
 
         Use `absurdctl <command> --help` to see every option when you need more detail.
 
@@ -1553,6 +1655,7 @@ Commands:
   drop-queue      Drop an existing queue
   list-queues     List all existing queues
   spawn-task      Spawn a new task
+  emit-event      Emit an event to wake waiting tasks
   list-tasks      List tasks with optional filtering
   cancel-task     Cancel a running or pending task
   dump-task       Dump task or run details including checkpoints
@@ -1576,6 +1679,7 @@ Examples:
   absurdctl drop-queue myqueue --yes
   absurdctl list-queues
   absurdctl spawn-task my-task -P foo=bar -P count:=42
+  absurdctl emit-event order.completed -P orderId=123
   absurdctl list-tasks --queue=default --status=failed
   absurdctl cancel-task 019a32d3-8425-7ae2-a5af-2f17a6707666
   absurdctl dump-task --task-id=019a32d3-8425-7ae2-a5af-2f17a6707666
@@ -1604,6 +1708,8 @@ def main():
         cmd_init(args)
     elif command == "spawn-task":
         cmd_spawn_task(args)
+    elif command == "emit-event":
+        cmd_emit_event(args)
     elif command == "list-tasks":
         cmd_list_tasks(args)
     elif command == "cancel-task":
