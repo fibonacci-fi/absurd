@@ -106,6 +106,17 @@ export class CancelledTask extends Error {
 }
 
 /**
+ * Throw this error from a task handler to permanently abort the task
+ * without retrying. The task will be marked as cancelled.
+ */
+export class FatalTaskError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FatalTaskError";
+  }
+}
+
+/**
  * This error is thrown when awaiting an event ran into a timeout.
  */
 export class TimeoutError extends Error {
@@ -458,6 +469,7 @@ export class Absurd {
   private readonly log: Log;
   private worker: Worker | null = null;
   private readonly hooks: AbsurdHooks;
+  private maxNoClaimCount: number = 3;
 
   constructor(options: AbsurdOptions | string | pg.Pool = {}) {
     if (typeof options === "string" || isQueryable(options)) {
@@ -801,6 +813,9 @@ export class Absurd {
     };
 
     this.worker = worker;
+    const maxNoWorkCount = this.maxNoClaimCount;
+    let retriesNoWork = 0;
+
     workerLoopPromise = (async () => {
       while (running) {
         try {
@@ -824,9 +839,20 @@ export class Absurd {
           });
 
           if (messages.length === 0) {
+            retriesNoWork += 1;
+            if (retriesNoWork >= maxNoWorkCount) {
+              this.log.warn(
+                `[absurd] worker ${workerId} has been idle for ${maxNoWorkCount} consecutive batches without claiming any tasks`,
+              );
+              running = false;
+              continue;
+            }
             await waitForAvailability();
             continue;
           }
+
+          // we found some work messages, reset the retry counter
+          retriesNoWork = 0;
 
           for (const task of messages) {
             const promise = this.executeTask(task, claimTimeout, {
@@ -921,6 +947,12 @@ export class Absurd {
     } catch (err) {
       if (err instanceof SuspendTask || err instanceof CancelledTask) {
         // Task suspended or cancelled (sleep or await), don't complete or fail
+        return;
+      }
+      if (err instanceof FatalTaskError) {
+        this.log.error("[absurd] task fatally aborted:", err);
+        await failTaskRun(this.con, this.queueName, task.run_id, err);
+        await this.cancelTask(task.task_id);
         return;
       }
       this.log.error("[absurd] task execution failed:", err);
