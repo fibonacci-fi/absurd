@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -52,7 +54,7 @@ func New(cfg config.Config, db *sql.DB) (*Server, error) {
 		return nil, fmt.Errorf("load index html: %w", err)
 	}
 
-	s.mux = s.withBasePath(s.routes())
+	s.mux = s.withBasePath(s.withAuthentication(s.routes()))
 	return s, nil
 }
 
@@ -102,6 +104,37 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		duration := time.Since(start)
 		log.Printf("%s %s -> %d (%s)", r.Method, r.URL.Path, ww.status, duration)
 	})
+}
+
+func (s *Server) withAuthentication(next http.Handler) http.Handler {
+	if !s.cfg.Auth.Enabled() {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Keep the health endpoint usable by local and platform probes. It only
+		// reports database availability and exposes no workflow data.
+		if r.URL != nil && r.URL.Path == "/_healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		username, password, ok := r.BasicAuth()
+		if !ok || !constantTimeEqual(username, s.cfg.Auth.Username) || !constantTimeEqual(password, s.cfg.Auth.Password) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Habitat", charset="UTF-8"`)
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func constantTimeEqual(got, expected string) bool {
+	gotHash := sha256.Sum256([]byte(got))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return subtle.ConstantTimeCompare(gotHash[:], expectedHash[:]) == 1
 }
 
 func (s *Server) routes() http.Handler {

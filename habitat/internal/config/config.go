@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -12,7 +13,7 @@ import (
 
 const (
 	envPrefix            = "HABITAT_"
-	defaultListenAddress = ":7890"
+	defaultListenAddress = "127.0.0.1:7890"
 	defaultBasePath      = ""
 	defaultDBURL         = ""
 	defaultDBHost        = "localhost"
@@ -22,13 +23,27 @@ const (
 	defaultDBSSLCert     = ""
 	defaultDBSSLRootCert = ""
 	defaultDBSSLKey      = ""
+	minAuthPasswordBytes = 16
 )
 
 // Config captures runtime configuration for the dashboard server.
 type Config struct {
 	ListenAddress string
 	BasePath      string
+	Auth          AuthConfig
 	DB            DBConfig
+}
+
+// AuthConfig contains the credentials required to access Habitat outside the
+// unauthenticated health endpoint.
+type AuthConfig struct {
+	Username string
+	Password string
+}
+
+// Enabled reports whether both authentication credentials are configured.
+func (c AuthConfig) Enabled() bool {
+	return c.Username != "" && c.Password != ""
 }
 
 // DBConfig describes how to connect to Postgres.
@@ -53,6 +68,10 @@ func FromArgs(args []string) (Config, error) {
 	cfg := Config{
 		ListenAddress: envDefault("LISTEN", defaultListenAddress),
 		BasePath:      envDefault("BASE_PATH", defaultBasePath),
+		Auth: AuthConfig{
+			Username: envDefault("AUTH_USERNAME", ""),
+			Password: envDefault("AUTH_PASSWORD", ""),
+		},
 		DB: DBConfig{
 			URL:         envDefault("DB_URL", defaultDBURL),
 			Host:        envDefault("DB_HOST", defaultDBHost),
@@ -90,6 +109,19 @@ func FromArgs(args []string) (Config, error) {
 	}
 	cfg.BasePath = normalizedBasePath
 
+	if (cfg.Auth.Username == "") != (cfg.Auth.Password == "") {
+		return Config{}, errors.New("HABITAT_AUTH_USERNAME and HABITAT_AUTH_PASSWORD must be configured together")
+	}
+	if cfg.Auth.Enabled() && len(cfg.Auth.Password) < minAuthPasswordBytes {
+		return Config{}, fmt.Errorf("HABITAT_AUTH_PASSWORD must be at least %d bytes", minAuthPasswordBytes)
+	}
+	if !isLoopbackListenAddress(cfg.ListenAddress) && !cfg.Auth.Enabled() {
+		return Config{}, fmt.Errorf(
+			"refusing unauthenticated non-loopback listener %q: configure HABITAT_AUTH_USERNAME and HABITAT_AUTH_PASSWORD",
+			cfg.ListenAddress,
+		)
+	}
+
 	if cfg.DB.URL == "" {
 		if cfg.DB.Host == "" {
 			return Config{}, errors.New("database host is required when --db-url is not supplied (set HABITAT_DB_HOST)")
@@ -100,6 +132,18 @@ func FromArgs(args []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func isLoopbackListenAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ConnectionString builds the effective connection string for the supplied DB settings.

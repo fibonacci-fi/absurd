@@ -46,11 +46,24 @@ Habitat can be configured via command-line flags or environment variables (prefi
 | `-db-password` | `HABITAT_DB_PASSWORD` | - | Database password |
 | `-db-sslmode` | `HABITAT_DB_SSLMODE` | `disable` | SSL mode |
 
+### Authentication Options
+
+Habitat binds to loopback by default. A non-loopback listener is refused unless
+both HTTP Basic credentials are configured. Keep the password in a secret
+manager and terminate TLS at a trusted reverse proxy; Basic credentials must
+not cross a plaintext network. The health endpoint remains unauthenticated for
+platform probes and exposes only database availability.
+
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `HABITAT_AUTH_USERNAME` | - | Operator identity required by the UI and API |
+| `HABITAT_AUTH_PASSWORD` | - | Secret operator password (minimum 16 bytes); configure together with the username |
+
 ### Server Options
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-listen` | `HABITAT_LISTEN` | `:7890` | Address to listen on |
+| `-listen` | `HABITAT_LISTEN` | `127.0.0.1:7890` | Address to listen on; non-loopback requires authentication |
 | `-base-path` | `HABITAT_BASE_PATH` | - | Serve UI/API under a URL prefix (e.g. `/habitat`) |
 
 When Habitat is behind a reverse proxy, it also honors `X-Forwarded-Prefix` (plus
