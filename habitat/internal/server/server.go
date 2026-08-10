@@ -2,8 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -21,8 +22,9 @@ import (
 
 // Server exposes the HTTP API and static UI.
 type Server struct {
-	cfg config.Config
-	db  *sql.DB
+	cfg               config.Config
+	db                *sql.DB
+	authComparisonKey [32]byte
 
 	staticHandler http.Handler
 	indexHTML     []byte
@@ -35,6 +37,11 @@ func New(cfg config.Config, db *sql.DB) (*Server, error) {
 	s := &Server{
 		cfg: cfg,
 		db:  db,
+	}
+	if cfg.Auth.Enabled() {
+		if _, err := rand.Read(s.authComparisonKey[:]); err != nil {
+			return nil, fmt.Errorf("initialize authentication comparison key: %w", err)
+		}
 	}
 
 	staticFS, err := web.StaticFS()
@@ -120,7 +127,7 @@ func (s *Server) withAuthentication(next http.Handler) http.Handler {
 		}
 
 		username, password, ok := r.BasicAuth()
-		if !ok || !constantTimeEqual(username, s.cfg.Auth.Username) || !constantTimeEqual(password, s.cfg.Auth.Password) {
+		if !ok || !s.constantTimeEqual(username, s.cfg.Auth.Username) || !s.constantTimeEqual(password, s.cfg.Auth.Password) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Habitat", charset="UTF-8"`)
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -131,10 +138,14 @@ func (s *Server) withAuthentication(next http.Handler) http.Handler {
 	})
 }
 
-func constantTimeEqual(got, expected string) bool {
-	gotHash := sha256.Sum256([]byte(got))
-	expectedHash := sha256.Sum256([]byte(expected))
-	return subtle.ConstantTimeCompare(gotHash[:], expectedHash[:]) == 1
+func (s *Server) constantTimeEqual(got, expected string) bool {
+	return hmac.Equal(s.authenticationTag(got), s.authenticationTag(expected))
+}
+
+func (s *Server) authenticationTag(value string) []byte {
+	mac := hmac.New(sha256.New, s.authComparisonKey[:])
+	_, _ = mac.Write([]byte(value))
+	return mac.Sum(nil)
 }
 
 func (s *Server) routes() http.Handler {
