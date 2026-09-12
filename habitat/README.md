@@ -46,12 +46,40 @@ Habitat can be configured via command-line flags or environment variables (prefi
 | `-db-password` | `HABITAT_DB_PASSWORD` | - | Database password |
 | `-db-sslmode` | `HABITAT_DB_SSLMODE` | `disable` | SSL mode |
 
+### Authentication Options
+
+Habitat binds to loopback by default. A non-loopback listener is refused unless
+both HTTP Basic credentials are configured. Keep the password in a secret
+manager and terminate TLS at a trusted reverse proxy; Basic credentials must
+not cross a plaintext network. The health endpoint remains unauthenticated for
+platform probes and exposes only database availability.
+
+| Environment Variable | Default | Description |
+|----------------------|---------|-------------|
+| `HABITAT_AUTH_USERNAME` | - | Operator identity required by the UI and API; must not contain `:` |
+| `HABITAT_AUTH_PASSWORD` | - | Secret operator password (minimum 16 bytes); configure together with the username |
+
 ### Server Options
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-listen` | `HABITAT_LISTEN` | `:7890` | Address to listen on |
+| `-listen` | `HABITAT_LISTEN` | `127.0.0.1:7890` | Address to listen on; non-loopback requires authentication |
 | `-base-path` | `HABITAT_BASE_PATH` | - | Serve UI/API under a URL prefix (e.g. `/habitat`) |
 
 When Habitat is behind a reverse proxy, it also honors `X-Forwarded-Prefix` (plus
 `X-Forwarded-Path` / `X-Script-Name`) to generate correct UI and API URLs.
+
+## Verification
+
+After building the frontend with `cd ui && npm ci --ignore-scripts && npm run build`,
+run `go test -race ./...` and `go vet ./...` from `habitat`. The Go tests use an
+in-memory scripted SQL driver; they do not connect to PostgreSQL. Authentication
+integration tests parse the real configuration and construct the production mux,
+covering UI/static/API access, credentials, health probes, and base-path routing.
+
+The `Habitat authentication` workflow builds the real frontend, runs these checks
+and the Go build, then demonstrates that the new contracts fail on the pinned
+pre-authentication source. It also runs on contributor branches matching
+`codex/habitat-auth-*`, allowing a fork to produce evidence without repository
+secrets or privileged pull-request approval. These checks qualify source behavior;
+they do not establish that a deployment has provisioned credentials or TLS.
