@@ -68,3 +68,18 @@ platform probes and exposes only database availability.
 
 When Habitat is behind a reverse proxy, it also honors `X-Forwarded-Prefix` (plus
 `X-Forwarded-Path` / `X-Script-Name`) to generate correct UI and API URLs.
+
+## Verification
+
+After building the frontend with `cd ui && npm ci --ignore-scripts && npm run build`,
+run `go test -race ./...` and `go vet ./...` from `habitat`. The Go tests use an
+in-memory scripted SQL driver; they do not connect to PostgreSQL. Authentication
+integration tests parse the real configuration and construct the production mux,
+covering UI/static/API access, credentials, health probes, and base-path routing.
+
+The `Habitat authentication` workflow builds the real frontend, runs these checks
+and the Go build, then demonstrates that the new contracts fail on the pinned
+pre-authentication source. It also runs on contributor branches matching
+`codex/habitat-auth-*`, allowing a fork to produce evidence without repository
+secrets or privileged pull-request approval. These checks qualify source behavior;
+they do not establish that a deployment has provisioned credentials or TLS.
