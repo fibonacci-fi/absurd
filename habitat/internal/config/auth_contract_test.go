@@ -20,6 +20,7 @@ func TestAuthContractDefaultAndListener(t *testing.T) {
 		{name: "IPv6 wildcard", listen: "[::]:7890", wantError: "refusing unauthenticated non-loopback listener"},
 		{name: "hostname", listen: "habitat.example:7890", wantError: "refusing unauthenticated non-loopback listener"},
 		{name: "authenticated wildcard", listen: ":7890", username: "fixture", password: "fixture-long-password"},
+		{name: "colon username", username: "fixture:operator", password: "fixture-long-password", wantError: "must not contain a colon"},
 		{name: "username only", username: "fixture", wantError: "must be configured together"},
 		{name: "password only", password: "fixture-long-password", wantError: "must be configured together"},
 		{name: "short password", username: "fixture", password: "short", wantError: "at least 16 bytes"},

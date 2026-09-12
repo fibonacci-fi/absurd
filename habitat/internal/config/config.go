@@ -112,6 +112,9 @@ func FromArgs(args []string) (Config, error) {
 	if (cfg.Auth.Username == "") != (cfg.Auth.Password == "") {
 		return Config{}, errors.New("HABITAT_AUTH_USERNAME and HABITAT_AUTH_PASSWORD must be configured together")
 	}
+	if strings.Contains(cfg.Auth.Username, ":") {
+		return Config{}, errors.New("HABITAT_AUTH_USERNAME must not contain a colon")
+	}
 	if cfg.Auth.Enabled() && len(cfg.Auth.Password) < minAuthPasswordBytes {
 		return Config{}, fmt.Errorf("HABITAT_AUTH_PASSWORD must be at least %d bytes", minAuthPasswordBytes)
 	}

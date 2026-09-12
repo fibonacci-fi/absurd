@@ -56,7 +56,7 @@ platform probes and exposes only database availability.
 
 | Environment Variable | Default | Description |
 |----------------------|---------|-------------|
-| `HABITAT_AUTH_USERNAME` | - | Operator identity required by the UI and API |
+| `HABITAT_AUTH_USERNAME` | - | Operator identity required by the UI and API; must not contain `:` |
 | `HABITAT_AUTH_PASSWORD` | - | Secret operator password (minimum 16 bytes); configure together with the username |
 
 ### Server Options

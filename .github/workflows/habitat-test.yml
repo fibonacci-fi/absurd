@@ -75,3 +75,23 @@ jobs:
           assert 'TestAuthIntegrationHealthAndBasePath' in passed
           print('Baseline compiled and failed all three authentication contracts; compatibility controls passed.')
           PY
+      - name: Prove unusable usernames were accepted by the original authentication patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline="$(mktemp -d "$RUNNER_TEMP/habitat-auth-baseline.XXXXXX")"
+          git archive 0fb15672e25c2be8533b8aef30a07edd7e8f5499 habitat | tar -x -C "$baseline"
+          cp habitat/internal/config/auth_contract_test.go "$baseline/habitat/internal/config/"
+          cd "$baseline/habitat"
+          if go test -json -count=1 ./internal/config -run '^TestAuthContractDefaultAndListener/colon_username$' > "$RUNNER_TEMP/habitat-username-baseline.json"; then
+            echo 'Expected original auth source to accept an unusable username.' >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/habitat-username-baseline.json"
+          python3 - "$RUNNER_TEMP/habitat-username-baseline.json" <<'PY'
+          import json, sys
+          events = [json.loads(line) for line in open(sys.argv[1])]
+          assert any(e.get('Action') == 'fail' and e.get('Test') ==
+                     'TestAuthContractDefaultAndListener/colon_username' for e in events)
+          print('Original auth patch compiled and failed the unusable-username contract.')
+          PY
