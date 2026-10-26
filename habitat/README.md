@@ -1,6 +1,6 @@
 # Absurd Habitat
 
-GVA's compatibility revision `1b9cf5668c91d6a806fbd5e784e8c7e4146a5f8b`
+GVA's compatibility revision `a25436dc48f0f60ecd80c69e5ae887303217bf82`
 backports the Habitat authentication boundary to its existing `e7404974` pin.
 It changes only Habitat code, tests and this README; SQL and SDK bytes remain
 identical to that pin. This revision is included in canonical history without
