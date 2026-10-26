@@ -75,6 +75,15 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", s.cfg.ListenAddress, err)
 	}
+	// Hostnames such as localhost can resolve differently from their spelling.
+	// Enforce the unauthenticated boundary on the socket before serving it.
+	if !s.cfg.Auth.Enabled() {
+		address, ok := listener.Addr().(*net.TCPAddr)
+		if !ok || !address.IP.IsLoopback() {
+			_ = listener.Close()
+			return fmt.Errorf("refusing unauthenticated non-loopback listener %q", listener.Addr())
+		}
+	}
 	log.Printf("dashboard listening on %s", listener.Addr())
 
 	errCh := make(chan error, 1)
