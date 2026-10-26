@@ -163,6 +163,12 @@ begin
   );
 
   execute format(
+    'create index if not exists %I on absurd.%I (state)',
+    ('t_' || p_queue_name) || '_si',
+    't_' || p_queue_name
+  );
+
+  execute format(
     'create index if not exists %I on absurd.%I (state, available_at)',
     ('r_' || p_queue_name) || '_sai',
     'r_' || p_queue_name
