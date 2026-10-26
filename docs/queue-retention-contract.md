@@ -1,12 +1,14 @@
-# GVA queue retention contract — owner decision required
+# GVA queue retention contract — approved indefinite retention
 
-Proposed on 2026-10-26 for Workboard task.5de6f122. Owner: Andrew Pierce.
-Status: draft awaiting explicit owner approval. This document grants no cleanup,
-DDL, runtime or operator execution authority.
+Approved on 2026-10-26 for Workboard task.5de6f122. Named owner: Andrew Pierce.
+The task's authorizing user explicitly approved this indefinite-retention decision
+and substituted their sign-off for Andrew's for this contract. This approval
+covers the written policy only; it grants no cleanup, DDL, runtime or operator
+execution authority.
 
 ## TTL and failed-task handling
 
-The proposed effective TTL is **indefinite** for tasks, runs, checkpoints and
+The approved effective TTL is **indefinite** for tasks, runs, checkpoints and
 events in all current mixed financial GVA queues. Keep cleanup unscheduled.
 Failed and cancelled tasks remain indefinitely until their exact signed-attempt,
 finality and accounting receipt evidence is reconciled. Completed tasks are not
@@ -22,10 +24,11 @@ first-write-wins event history. Neither function expresses this financial
 eligibility contract. Do not substitute a generic TTL or current-task state for
 proof that no unresolved attempt remains.
 
-No cleanup may run before explicit owner approval. Any later cleanup also needs
+The approved policy keeps cleanup unscheduled. Any later cleanup requires a new
+owner-approved eligibility contract and also needs
 separate runtime/data authority, an exact dry-run inventory and bounded batch
 limits, before/after counts, retained proof/receipt identifiers and a verified
-reader-compatibility/rollback plan. This draft implements no cleanup mechanism,
+reader-compatibility/rollback plan. This contract implements no cleanup mechanism,
 schedule, queue deletion or data mutation.
 
 ## Current reader census
