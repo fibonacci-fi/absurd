@@ -26,6 +26,7 @@ def test_new_queue_creates_performance_indexes(client):
     queue = "index_create"
     client.create_queue(queue)
 
+    assert _index_exists(client.conn, f"t_{queue}", f"t_{queue}_si")
     assert _index_exists(client.conn, f"r_{queue}", f"r_{queue}_cei")
     assert _index_exists(client.conn, f"w_{queue}", f"w_{queue}_ti")
     assert _index_exists(client.conn, f"e_{queue}", f"e_{queue}_eai")
@@ -119,3 +120,38 @@ def test_wait_cleanup_delete_uses_task_id_index(client):
     )
 
     assert f"w_{queue}_ti" in plan
+
+
+def test_claim_cancellation_uses_task_state_index_with_terminal_history(client):
+    """Ordinary planner, representative skew; no forced enable_seqscan=off."""
+    queue = "index_task_state"
+    client.create_queue(queue)
+    client.conn.execute(
+        sql.SQL("""insert into absurd.{t}(task_id, task_name, params, state)
+        select uuid_generate_v4(), 'history', '{{}}', 'completed'
+        from generate_series(1,100000)""").format(t=client.get_table("t", queue))
+    )
+    for n in range(10):
+        client.spawn_task(queue, "pending", {"n": n})
+    client.conn.execute(sql.SQL("analyze absurd.{t}").format(t=client.get_table("t", queue)))
+    # Exact task predicate from claim_task's cancellation sweep.
+    plan = _explain(client.conn, sql.SQL("""
+        explain select task_id from absurd.{t}
+        where state in ('pending','sleeping','running')
+          and (((cancellation->>'max_delay')::bigint is not null
+                and first_started_at is null
+                and extract(epoch from (now()-enqueue_at)) >= (cancellation->>'max_delay')::bigint)
+            or ((cancellation->>'max_duration')::bigint is not null
+                and first_started_at is not null
+                and extract(epoch from (now()-first_started_at)) >= (cancellation->>'max_duration')::bigint))
+        order by task_id
+    """).format(t=client.get_table("t", queue)))
+    assert f"t_{queue}_si" in plan
+    claimed = client.claim_tasks(queue, qty=1)
+    assert len(claimed) == 1 and claimed[0]["task_name"] == "pending"
+
+
+def test_task_state_index_handles_maximum_and_quoted_queue_names(client):
+    for queue in ['q' * 57, 'quoted"queue']:
+        client.create_queue(queue)
+        assert _index_exists(client.conn, f"t_{queue}", f"t_{queue}_si")
