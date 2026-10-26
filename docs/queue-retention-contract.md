@@ -75,8 +75,12 @@ retention eligibility change.
 New queues receive a non-unique btree t_<queue>(state) index in ensure_queue_tables.
 Existing create_queue calls return early; use the reviewed
 [manual migration draft](../sql/migrations/manual-task-state-index.sql) only
-under separate operator authority. It changes the queue factory and builds one
-index per existing queue concurrently, outside any transaction. Identifiers are
+under separate operator authority. All readonly queue/index/factory preflights run before any permanent mutation.
+Built-in MD5 fingerprints accept only the exact reviewed old/new factory body
+and expected function attributes; this is a drift guard, not authentication.
+Then the migration changes the factory and builds one index per existing queue
+concurrently, outside any transaction. A hard post-build assertion rechecks the
+factory and every current queue, including queues created since preflight. Identifiers are
 quoted and byte-length validated. Invalid or conflicting existing relations
 cause a hard stop; never drop an index automatically to bypass that check.
 Legacy incompatible queue names require their own reviewed plan.

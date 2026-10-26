@@ -1,10 +1,57 @@
--- MANUAL migration draft: explicit operator approval is required before use.
--- Run with psql, without --single-transaction or an enclosing BEGIN. No task,
--- run, checkpoint, event or wait row is deleted or modified.
+-- MANUAL migration draft: separate explicit operator approval is required.
+-- Run psql without --single-transaction or an enclosing BEGIN. No task/run/
+-- checkpoint/event/wait data is deleted or modified. An interrupted concurrent
+-- build needs reviewed repair, never automatic DROP or blind IF NOT EXISTS.
 \set ON_ERROR_STOP on
 set lock_timeout = '2s';
 set statement_timeout = '10min';
 
+-- PHASE1: all permanent-target preflights precede factory/index mutation.
+do $check$
+declare q record; existing record; function_ok boolean;
+begin
+  -- MD5 here is a built-in source-drift fingerprint, not authentication.
+  select md5(p.prosrc) in ('29f1d87c611f19abe467dc3873de6799','60171bd9ebbee5f9b2f828b6199a5cfc') and not p.prosecdef
+    and not p.proisstrict and not p.proretset and p.prorettype='void'::regtype
+    and p.provolatile='v' and p.proparallel='u' and p.proconfig is null
+    and p.pronargdefaults=0 and l.lanname='plpgsql' into function_ok
+    from pg_proc p join pg_language l on l.oid=p.prolang
+    where p.oid=to_regprocedure('absurd.ensure_queue_tables(text)');
+  if not coalesce(function_ok,false) then
+    raise exception 'Queue factory source or attributes drifted; reviewed reconciliation required';
+  end if;
+  for q in select queue_name from absurd.queues order by queue_name loop
+    perform absurd.validate_queue_name(q.queue_name);
+    select i.indisvalid, i.indisready, i.indisunique, i.indisexclusion,
+      i.indnkeyatts, i.indnatts, i.indpred is null as unfiltered,
+      i.indexprs is null as plain_columns, i.indoption[0]=0 as ordinary_order,
+      i.indcollation[0]=a.attcollation as matching_collation,
+      opc.opcdefault and opc.opcintype='text'::regtype as default_text_ops,
+      am.amname, a.attname, ns.nspname, tbl.relname, idx.relkind
+      into existing
+      from pg_class idx
+      join pg_namespace ins on ins.oid=idx.relnamespace
+      left join pg_index i on i.indexrelid=idx.oid
+      left join pg_class tbl on tbl.oid=i.indrelid
+      left join pg_namespace ns on ns.oid=tbl.relnamespace
+      left join pg_am am on am.oid=idx.relam
+      left join pg_opclass opc on opc.oid=i.indclass[0]
+      left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=i.indkey[0]
+      where ins.nspname='absurd' and idx.relname='t_' || q.queue_name || '_si';
+    if found and not coalesce((existing.indisvalid and existing.indisready
+        and not existing.indisunique and not existing.indisexclusion
+        and existing.indnkeyatts=1 and existing.indnatts=1
+        and existing.unfiltered and existing.plain_columns and existing.ordinary_order
+        and existing.matching_collation and existing.default_text_ops
+        and existing.amname='btree' and existing.attname='state' and existing.relkind='i'
+        and existing.nspname='absurd' and existing.relname='t_' || q.queue_name),false) then
+      raise exception 'Invalid or conflicting task-state index for queue %; reviewed repair required', q.queue_name;
+    end if;
+  end loop;
+end;
+$check$;
+
+-- PHASE2: install only the exact reviewed factory after successful preflights.
 create or replace function absurd.ensure_queue_tables (p_queue_name text)
   returns void
   language plpgsql
@@ -135,17 +182,35 @@ begin
 end;
 $$;
 
--- Refuse to let IF NOT EXISTS silently preserve an invalid or conflicting
--- index. An interrupted concurrent build requires separate reviewed repair;
--- this migration never drops an index automatically.
+-- PHASE3: concurrent builds must be outside a transaction.
+select format('create index concurrently if not exists %I on absurd.%I (state);',
+              't_' || queue_name || '_si', 't_' || queue_name)
+from absurd.queues order by queue_name
+\gexec
+
+-- PHASE4: hard assertions, including queues created since the preflight.
+-- IF NOT EXISTS does not establish correctness if another actor won the name.
 do $check$
-declare q record; existing record;
+declare q record; existing record; function_ok boolean;
 begin
+  -- MD5 here is a built-in source-drift fingerprint, not authentication.
+  select md5(p.prosrc) in ('60171bd9ebbee5f9b2f828b6199a5cfc') and not p.prosecdef
+    and not p.proisstrict and not p.proretset and p.prorettype='void'::regtype
+    and p.provolatile='v' and p.proparallel='u' and p.proconfig is null
+    and p.pronargdefaults=0 and l.lanname='plpgsql' into function_ok
+    from pg_proc p join pg_language l on l.oid=p.prolang
+    where p.oid=to_regprocedure('absurd.ensure_queue_tables(text)');
+  if not coalesce(function_ok,false) then
+    raise exception 'Queue factory source or attributes drifted; reviewed reconciliation required';
+  end if;
   for q in select queue_name from absurd.queues order by queue_name loop
     perform absurd.validate_queue_name(q.queue_name);
-    select i.indisvalid, i.indisready, i.indisunique, i.indisexclusion, i.indnkeyatts, i.indnatts,
-      i.indpred is null as unfiltered, i.indexprs is null as plain_columns,
-      am.amname, a.attname, ns.nspname, tbl.relname
+    select i.indisvalid, i.indisready, i.indisunique, i.indisexclusion,
+      i.indnkeyatts, i.indnatts, i.indpred is null as unfiltered,
+      i.indexprs is null as plain_columns, i.indoption[0]=0 as ordinary_order,
+      i.indcollation[0]=a.attcollation as matching_collation,
+      opc.opcdefault and opc.opcintype='text'::regtype as default_text_ops,
+      am.amname, a.attname, ns.nspname, tbl.relname, idx.relkind
       into existing
       from pg_class idx
       join pg_namespace ins on ins.oid=idx.relnamespace
@@ -153,26 +218,25 @@ begin
       left join pg_class tbl on tbl.oid=i.indrelid
       left join pg_namespace ns on ns.oid=tbl.relnamespace
       left join pg_am am on am.oid=idx.relam
+      left join pg_opclass opc on opc.oid=i.indclass[0]
       left join pg_attribute a on a.attrelid=tbl.oid and a.attnum=i.indkey[0]
       where ins.nspname='absurd' and idx.relname='t_' || q.queue_name || '_si';
+    if not found then
+      raise exception 'Task-state index missing after build for queue %', q.queue_name;
+    end if;
     if found and not coalesce((existing.indisvalid and existing.indisready
         and not existing.indisunique and not existing.indisexclusion
         and existing.indnkeyatts=1 and existing.indnatts=1
-        and existing.unfiltered and existing.plain_columns
-        and existing.amname='btree' and existing.attname='state'
-        and existing.nspname='absurd' and existing.relname='t_' || q.queue_name), false) then
+        and existing.unfiltered and existing.plain_columns and existing.ordinary_order
+        and existing.matching_collation and existing.default_text_ops
+        and existing.amname='btree' and existing.attname='state' and existing.relkind='i'
+        and existing.nspname='absurd' and existing.relname='t_' || q.queue_name),false) then
       raise exception 'Invalid or conflicting task-state index for queue %; reviewed repair required', q.queue_name;
     end if;
   end loop;
 end;
 $check$;
 
-select format('create index concurrently if not exists %I on absurd.%I (state);',
-              't_' || queue_name || '_si', 't_' || queue_name)
-from absurd.queues order by queue_name
-\gexec
-
--- Readback: every listed row must report valid/ready before completion.
 select q.queue_name, i.indisvalid, i.indisready, pg_get_indexdef(i.indexrelid)
 from absurd.queues q
 left join pg_class idx on idx.relname='t_' || q.queue_name || '_si'
