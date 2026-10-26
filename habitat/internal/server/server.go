@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -17,8 +20,9 @@ import (
 
 // Server exposes the HTTP API and static UI.
 type Server struct {
-	cfg config.Config
-	db  *sql.DB
+	cfg               config.Config
+	db                *sql.DB
+	authComparisonKey [32]byte
 
 	staticHandler http.Handler
 	indexHTML     []byte
@@ -31,6 +35,11 @@ func New(cfg config.Config, db *sql.DB) (*Server, error) {
 	s := &Server{
 		cfg: cfg,
 		db:  db,
+	}
+	if cfg.Auth.Enabled() {
+		if _, err := rand.Read(s.authComparisonKey[:]); err != nil {
+			return nil, fmt.Errorf("initialize authentication comparison key: %w", err)
+		}
 	}
 
 	staticFS, err := web.StaticFS()
@@ -50,7 +59,7 @@ func New(cfg config.Config, db *sql.DB) (*Server, error) {
 		return nil, fmt.Errorf("load index html: %w", err)
 	}
 
-	s.mux = s.routes()
+	s.mux = s.withAuthentication(s.routes())
 	return s, nil
 }
 
@@ -114,6 +123,38 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("/", s.handleIndex)
 	return mux
+}
+
+func (s *Server) withAuthentication(next http.Handler) http.Handler {
+	if !s.cfg.Auth.Enabled() {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the exact health probe is public; operational routes, static
+		// assets and ServeMux path normalization remain behind authentication.
+		if r.URL != nil && r.URL.Path == "/_healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		username, password, ok := r.BasicAuth()
+		if !ok || !s.constantTimeEqual(username, s.cfg.Auth.Username) || !s.constantTimeEqual(password, s.cfg.Auth.Password) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Habitat", charset="UTF-8"`)
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) constantTimeEqual(got, expected string) bool {
+	return hmac.Equal(s.authenticationTag(got), s.authenticationTag(expected))
+}
+
+func (s *Server) authenticationTag(value string) []byte {
+	mac := hmac.New(sha256.New, s.authComparisonKey[:])
+	_, _ = mac.Write([]byte(value))
+	return mac.Sum(nil)
 }
 
 type responseWriter struct {

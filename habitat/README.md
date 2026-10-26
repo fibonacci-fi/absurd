@@ -28,7 +28,18 @@ Start the habitat server:
 ./bin/habitat run -db-name your-database-name
 ```
 
-The dashboard will be available at `http://localhost:7890` by default.
+The dashboard will be available at `http://127.0.0.1:7890` by default.
+
+Habitat refuses to start on a non-loopback listener without both
+`HABITAT_AUTH_USERNAME` and `HABITAT_AUTH_PASSWORD`. Passwords must be at least
+16 bytes and usernames cannot contain `:`. With credentials configured, Basic
+authentication protects the dashboard, static assets and all `/api` routes.
+Only the exact `/_healthz` database-availability probe remains public.
+
+Set credentials even for a loopback listener when publishing it through a reverse
+proxy. Use HTTPS or a trusted TLS-terminating proxy; Basic credentials must not
+cross a plaintext network. Credentials are environment-only to keep them out of
+command-line arguments.
 
 ## Configuration
 
@@ -50,4 +61,6 @@ Habitat can be configured via command-line flags or environment variables (prefi
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-listen` | `HABITAT_LISTEN` | `:7890` | Address to listen on |
+| `-listen` | `HABITAT_LISTEN` | `127.0.0.1:7890` | Non-loopback requires authentication |
+| — | `HABITAT_AUTH_USERNAME` | - | Basic authentication username |
+| — | `HABITAT_AUTH_PASSWORD` | - | Basic authentication password (at least 16 bytes) |
